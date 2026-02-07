@@ -1,0 +1,245 @@
+diff --git a/third_party/blink/renderer/core/frame/navigator.cc b/third_party/blink/renderer/core/frame/navigator.cc
+--- a/third_party/blink/renderer/core/frame/navigator.cc
++++ b/third_party/blink/renderer/core/frame/navigator.cc
+@@ -10,6 +10,8 @@
+ #include "build/build_config.h"
+ #include "third_party/blink/public/common/user_agent/user_agent_metadata.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_controller.h"
++#include "base/command_line.h"
++#include "base/strings/string_number_conversions.h"
+ #include "third_party/blink/renderer/core/dom/document.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+@@ -20,6 +22,7 @@
+ #include "third_party/blink/renderer/core/probe/core_probes.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+ #include "third_party/blink/renderer/platform/language.h"
++#include "third_party/blink/renderer/core/antidetect/antidetect_utils.h"
+
+ namespace blink {
+
+@@ -60,14 +63,38 @@ String Navigator::productSub() const {
+ }
+
+ String Navigator::userAgent() const {
++  // Antidetect: Override user agent from command line
++  const auto* cmd = base::CommandLine::ForCurrentProcess();
++  if (cmd->HasSwitch(antidetect::kAntidetectUserAgent)) {
++    return String::FromUTF8(
++        cmd->GetSwitchValueASCII(antidetect::kAntidetectUserAgent));
++  }
++
+   if (LocalDOMWindow* window = GetWindow()) {
+     return window->GetFrame()
+         ? window->GetFrame()->Loader().UserAgent()
+         : String();
+   }
+   return String();
+ }
+
+ String Navigator::platform() const {
++  // Antidetect: Override platform string
++  const auto* cmd = base::CommandLine::ForCurrentProcess();
++  if (cmd->HasSwitch(antidetect::kAntidetectPlatform)) {
++    return String::FromUTF8(
++        cmd->GetSwitchValueASCII(antidetect::kAntidetectPlatform));
++  }
++
+   return NavigatorID::platform();
+ }
+
+diff --git a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
+--- a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
++++ b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
+@@ -4,13 +4,24 @@
+
+ #include "third_party/blink/renderer/core/frame/navigator_concurrent_hardware.h"
+
++#include "base/command_line.h"
++#include "base/strings/string_number_conversions.h"
+ #include "base/system/sys_info.h"
++#include "third_party/blink/renderer/core/antidetect/antidetect_utils.h"
+
+ namespace blink {
+
+ unsigned NavigatorConcurrentHardware::hardwareConcurrency() const {
++  // Antidetect: Override hardware concurrency
++  const auto* cmd = base::CommandLine::ForCurrentProcess();
++  if (cmd->HasSwitch(antidetect::kAntidetectHardwareConcurrency)) {
++    unsigned value = 0;
++    if (base::StringToUint(
++            cmd->GetSwitchValueASCII(antidetect::kAntidetectHardwareConcurrency),
++            &value) && value > 0) {
++      return value;
++    }
++  }
+   return static_cast<unsigned>(base::SysInfo::NumberOfProcessors());
+ }
+
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/frame/navigator_device_memory.cc b/third_party/blink/renderer/core/frame/navigator_device_memory.cc
+--- a/third_party/blink/renderer/core/frame/navigator_device_memory.cc
++++ b/third_party/blink/renderer/core/frame/navigator_device_memory.cc
+@@ -4,11 +4,24 @@
+
+ #include "third_party/blink/renderer/core/frame/navigator_device_memory.h"
+
++#include "base/command_line.h"
++#include "base/strings/string_number_conversions.h"
++#include "third_party/blink/renderer/core/antidetect/antidetect_utils.h"
++
+ namespace blink {
+
+ float NavigatorDeviceMemory::deviceMemory() const {
++  // Antidetect: Override device memory
++  const auto* cmd = base::CommandLine::ForCurrentProcess();
++  if (cmd->HasSwitch(antidetect::kAntidetectDeviceMemory)) {
++    double value = 0;
++    if (base::StringToDouble(
++            cmd->GetSwitchValueASCII(antidetect::kAntidetectDeviceMemory),
++            &value) && value > 0) {
++      return static_cast<float>(value);
++    }
++  }
+   return approximate_device_memory_;
+ }
+
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/frame/navigator_language.cc b/third_party/blink/renderer/core/frame/navigator_language.cc
+--- a/third_party/blink/renderer/core/frame/navigator_language.cc
++++ b/third_party/blink/renderer/core/frame/navigator_language.cc
+@@ -4,7 +4,10 @@
+
+ #include "third_party/blink/renderer/core/frame/navigator_language.h"
+
++#include "base/command_line.h"
++#include "base/strings/string_split.h"
+ #include "third_party/blink/renderer/platform/language.h"
++#include "third_party/blink/renderer/core/antidetect/antidetect_utils.h"
+
+ namespace blink {
+
+@@ -16,6 +19,19 @@ AtomicString NavigatorLanguage::language() {
+ }
+
+ const Vector<String>& NavigatorLanguage::languages() {
++  // Antidetect: Override languages from command line
++  const auto* cmd = base::CommandLine::ForCurrentProcess();
++  if (cmd->HasSwitch(antidetect::kAntidetectLanguages)) {
++    if (languages_dirty_ || languages_.empty()) {
++      languages_.clear();
++      std::string langs_str = cmd->GetSwitchValueASCII(
++          antidetect::kAntidetectLanguages);
++      std::vector<std::string> parts = base::SplitString(
++          langs_str, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
++      for (const auto& p : parts)
++        languages_.push_back(String::FromUTF8(p));
++      languages_dirty_ = false;
++    }
++    return languages_;
++  }
++
+   if (languages_dirty_) {
+     languages_ = {};
+     languages_.ReserveInitialCapacity(UserPreferredLanguages().size());
+diff --git a/third_party/blink/renderer/core/frame/screen.cc b/third_party/blink/renderer/core/frame/screen.cc
+--- a/third_party/blink/renderer/core/frame/screen.cc
++++ b/third_party/blink/renderer/core/frame/screen.cc
+@@ -5,8 +5,11 @@
+ #include "third_party/blink/renderer/core/frame/screen.h"
+
+ #include "base/numerics/safe_conversions.h"
++#include "base/command_line.h"
++#include "base/strings/string_number_conversions.h"
+ #include "third_party/blink/renderer/core/event_target_names.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
++#include "third_party/blink/renderer/core/antidetect/antidetect_utils.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+ #include "third_party/blink/renderer/core/frame/settings.h"
+ #include "third_party/blink/renderer/core/page/chrome_client.h"
+@@ -46,6 +49,16 @@ int Screen::height() const {
+ }
+
+ unsigned Screen::colorDepth() const {
++  // Antidetect: Override screen color depth
++  const auto* cmd = base::CommandLine::ForCurrentProcess();
++  if (cmd->HasSwitch(antidetect::kAntidetectScreenColorDepth)) {
++    unsigned value = 0;
++    if (base::StringToUint(
++            cmd->GetSwitchValueASCII(antidetect::kAntidetectScreenColorDepth),
++            &value)) {
++      return value;
++    }
++  }
+   if (!GetFrame())
+     return 0;
+   return base::saturated_cast<unsigned>(
+@@ -66,6 +79,24 @@ int Screen::availHeight() const {
+ }
+
+ int Screen::width() const {
++  // Antidetect: Override screen width
++  const auto* cmd = base::CommandLine::ForCurrentProcess();
++  if (cmd->HasSwitch(antidetect::kAntidetectScreenWidth)) {
++    int value = 0;
++    if (base::StringToInt(
++            cmd->GetSwitchValueASCII(antidetect::kAntidetectScreenWidth),
++            &value))
++      return value;
++  }
++
+   if (!GetFrame())
+     return 0;
+   LocalFrame* frame = GetFrame();
+@@ -78,6 +109,17 @@ int Screen::width() const {
+ }
+
+ int Screen::height() const {
++  // Antidetect: Override screen height
++  const auto* cmd = base::CommandLine::ForCurrentProcess();
++  if (cmd->HasSwitch(antidetect::kAntidetectScreenHeight)) {
++    int value = 0;
++    if (base::StringToInt(
++            cmd->GetSwitchValueASCII(antidetect::kAntidetectScreenHeight),
++            &value))
++      return value;
++  }
++
+   if (!GetFrame())
+     return 0;
+   LocalFrame* frame = GetFrame();
+diff --git a/third_party/blink/renderer/core/css/media_values.cc b/third_party/blink/renderer/core/css/media_values.cc
+--- a/third_party/blink/renderer/core/css/media_values.cc
++++ b/third_party/blink/renderer/core/css/media_values.cc
+@@ -5,6 +5,8 @@
+ #include "third_party/blink/renderer/core/css/media_values.h"
+
+ #include "base/notreached.h"
++#include "base/command_line.h"
++#include "base/strings/string_number_conversions.h"
+ #include "third_party/blink/public/common/css/screen_spanning.h"
+ #include "third_party/blink/renderer/core/css/css_resolution_units.h"
+ #include "third_party/blink/renderer/core/dom/document.h"
+@@ -15,6 +17,7 @@
+ #include "third_party/blink/renderer/core/layout/layout_object.h"
+ #include "third_party/blink/renderer/core/layout/layout_view.h"
+ #include "third_party/blink/renderer/core/page/page.h"
++#include "third_party/blink/renderer/core/antidetect/antidetect_utils.h"
+
+ namespace blink {
+
+@@ -50,6 +53,15 @@ double MediaValues::CalculateDevicePixelRatio(LocalFrame* frame) {
+ }
+
+ double MediaValues::CalculateDevicePixelRatio(LocalFrame* frame) {
++  // Antidetect: Override pixel ratio
++  const auto* cmd = base::CommandLine::ForCurrentProcess();
++  if (cmd->HasSwitch(antidetect::kAntidetectPixelRatio)) {
++    double value = 0;
++    if (base::StringToDouble(
++            cmd->GetSwitchValueASCII(antidetect::kAntidetectPixelRatio),
++            &value) && value > 0)
++      return value;
++  }
+   return frame->DevicePixelRatio();
+ }

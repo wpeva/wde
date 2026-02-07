@@ -1,0 +1,60 @@
+diff --git a/third_party/blink/renderer/modules/plugins/dom_plugin_array.cc b/third_party/blink/renderer/modules/plugins/dom_plugin_array.cc
+--- a/third_party/blink/renderer/modules/plugins/dom_plugin_array.cc
++++ b/third_party/blink/renderer/modules/plugins/dom_plugin_array.cc
+@@ -4,6 +4,10 @@
+
+ #include "third_party/blink/renderer/modules/plugins/dom_plugin_array.h"
+
++#include "base/command_line.h"
++#include "base/strings/string_split.h"
++#include "third_party/blink/renderer/core/antidetect/antidetect_utils.h"
++
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+ #include "third_party/blink/renderer/core/frame/navigator.h"
+@@ -30,6 +34,25 @@ void DOMPluginArray::Trace(Visitor* visitor) const {
+
+ unsigned DOMPluginArray::length() const {
++  // Antidetect: Override plugin list
++  const auto* cmd = base::CommandLine::ForCurrentProcess();
++  if (cmd->HasSwitch(antidetect::kAntidetectPluginList)) {
++    std::string plugin_list = cmd->GetSwitchValueASCII(
++        antidetect::kAntidetectPluginList);
++    if (plugin_list == "none" || plugin_list.empty())
++      return 0;
++    // Count semicolon-separated plugins
++    std::vector<std::string> parts = base::SplitString(
++        plugin_list, ";", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
++    return static_cast<unsigned>(parts.size());
++  }
+   return dom_plugins_.size();
+ }
+
+diff --git a/third_party/blink/renderer/modules/plugins/dom_mime_type_array.cc b/third_party/blink/renderer/modules/plugins/dom_mime_type_array.cc
+--- a/third_party/blink/renderer/modules/plugins/dom_mime_type_array.cc
++++ b/third_party/blink/renderer/modules/plugins/dom_mime_type_array.cc
+@@ -4,6 +4,9 @@
+
+ #include "third_party/blink/renderer/modules/plugins/dom_mime_type_array.h"
+
++#include "base/command_line.h"
++#include "third_party/blink/renderer/core/antidetect/antidetect_utils.h"
++
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+ #include "third_party/blink/renderer/core/page/page.h"
+@@ -25,6 +28,16 @@ void DOMMimeTypeArray::Trace(Visitor* visitor) const {
+
+ unsigned DOMMimeTypeArray::length() const {
++  // Antidetect: Override MIME type list
++  const auto* cmd = base::CommandLine::ForCurrentProcess();
++  if (cmd->HasSwitch(antidetect::kAntidetectPluginList)) {
++    std::string plugin_list = cmd->GetSwitchValueASCII(
++        antidetect::kAntidetectPluginList);
++    if (plugin_list == "none" || plugin_list.empty())
++      return 0;
++    // Return a reasonable MIME type count based on plugin count
++    return 2;  // application/pdf and text/pdf for Chromium PDF viewer
++  }
+   return dom_mime_types_.size();
+ }

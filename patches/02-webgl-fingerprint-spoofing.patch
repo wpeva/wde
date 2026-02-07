@@ -1,0 +1,163 @@
+diff --git a/gpu/command_buffer/service/gles2_cmd_decoder.cc b/gpu/command_buffer/service/gles2_cmd_decoder.cc
+--- a/gpu/command_buffer/service/gles2_cmd_decoder.cc
++++ b/gpu/command_buffer/service/gles2_cmd_decoder.cc
+@@ -20,6 +20,7 @@
+ #include "base/callback_helpers.h"
+ #include "base/command_line.h"
+ #include "base/containers/flat_set.h"
++#include "base/rand_util.h"
+ #include "base/hash/legacy_hash.h"
+ #include "base/logging.h"
+ #include "base/mac/scoped_nsobject.h"
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -10,6 +10,8 @@
+
+ #include "base/callback_helpers.h"
+ #include "base/command_line.h"
++#include "base/rand_util.h"
++#include "base/strings/string_number_conversions.h"
+ #include "base/feature_list.h"
+ #include "base/logging.h"
+ #include "base/metrics/histogram_macros.h"
+@@ -45,6 +47,7 @@
+ #include "third_party/blink/renderer/core/layout/layout_box.h"
+ #include "third_party/blink/renderer/core/probe/core_probes.h"
+ #include "third_party/blink/renderer/core/typed_arrays/array_buffer_view_helpers.h"
++#include "third_party/blink/renderer/core/antidetect/antidetect_utils.h"
+ #include "third_party/blink/renderer/modules/webgl/angle_instanced_arrays.h"
+ #include "third_party/blink/renderer/modules/webgl/ext_blend_min_max.h"
+ #include "third_party/blink/renderer/modules/webgl/ext_clip_control.h"
+@@ -600,6 +603,30 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+                                                     GLenum pname) {
+   ...
+ }
++
++// Antidetect: Override getParameter for WebGL vendor/renderer spoofing
++ScriptValue WebGLRenderingContextBase::getParameterAntidetect(
++    ScriptState* script_state,
++    GLenum pname) {
++  const auto* cmd = base::CommandLine::ForCurrentProcess();
++
++  if (pname == GL_RENDERER) {
++    if (cmd->HasSwitch(antidetect::kAntidetectWebglRenderer)) {
++      return WebGLAny(script_state,
++          String::FromUTF8(cmd->GetSwitchValueASCII(
++              antidetect::kAntidetectWebglRenderer)));
++    }
++  }
++
++  if (pname == GL_VENDOR) {
++    if (cmd->HasSwitch(antidetect::kAntidetectWebglVendor)) {
++      return WebGLAny(script_state,
++          String::FromUTF8(cmd->GetSwitchValueASCII(
++              antidetect::kAntidetectWebglVendor)));
++    }
++  }
++
++  return getParameter(script_state, pname);
++}
+
+ diff --git a/third_party/blink/renderer/modules/webgl/webgl_debug_renderer_info.cc b/third_party/blink/renderer/modules/webgl/webgl_debug_renderer_info.cc
+--- a/third_party/blink/renderer/modules/webgl/webgl_debug_renderer_info.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_debug_renderer_info.cc
+@@ -4,6 +4,8 @@
+
+ #include "third_party/blink/renderer/modules/webgl/webgl_debug_renderer_info.h"
+
++#include "base/command_line.h"
++#include "third_party/blink/renderer/core/antidetect/antidetect_utils.h"
+ #include "third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h"
+
+ namespace blink {
+@@ -25,6 +27,18 @@ bool WebGLDebugRendererInfo::Supported(WebGLRenderingContextBase*) const {
+
+ WebGLExtensionName WebGLDebugRendererInfo::GetName() const {
+   return kWebGLDebugRendererInfoName;
+ }
+
++// Antidetect: Intercept WEBGL_debug_renderer_info queries
++// These return unmasked vendor/renderer which is a major fingerprint vector
++ScriptValue WebGLDebugRendererInfo::GetUnmaskedVendorWebGL(
++    ScriptState* script_state) {
++  const auto* cmd = base::CommandLine::ForCurrentProcess();
++  if (cmd->HasSwitch(antidetect::kAntidetectWebglVendor)) {
++    return WebGLAny(script_state,
++        String::FromUTF8(cmd->GetSwitchValueASCII(
++            antidetect::kAntidetectWebglVendor)));
++  }
++  return ScriptValue();
++}
++
++ScriptValue WebGLDebugRendererInfo::GetUnmaskedRendererWebGL(
++    ScriptState* script_state) {
++  const auto* cmd = base::CommandLine::ForCurrentProcess();
++  if (cmd->HasSwitch(antidetect::kAntidetectWebglRenderer)) {
++    return WebGLAny(script_state,
++        String::FromUTF8(cmd->GetSwitchValueASCII(
++            antidetect::kAntidetectWebglRenderer)));
++  }
++  return ScriptValue();
++}
++
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h
+@@ -200,6 +200,10 @@ class MODULES_EXPORT WebGLRenderingContextBase : public CanvasRenderingContext,
+   ScriptValue getParameter(ScriptState*, GLenum pname);
+   ScriptValue getProgramParameter(ScriptState*, WebGLProgram*, GLenum pname);
+
++  // Antidetect: WebGL parameter spoofing
++  ScriptValue getParameterAntidetect(ScriptState* script_state,
++                                      GLenum pname);
++
+  protected:
+   friend class EXTDisjointTimerQuery;
+   friend class EXTDisjointTimerQueryWebGL2;
+diff --git a/gpu/config/gpu_info.cc b/gpu/config/gpu_info.cc
+--- a/gpu/config/gpu_info.cc
++++ b/gpu/config/gpu_info.cc
+@@ -5,6 +5,7 @@
+ #include "gpu/config/gpu_info.h"
+
+ #include "base/command_line.h"
++#include "base/rand_util.h"
+ #include "base/logging.h"
+ #include "base/notreached.h"
+ #include "gpu/config/gpu_util.h"
+@@ -80,6 +81,34 @@ void GPUInfo::EnumerateFields(
+   enumerator->EndAuxAttributes();
+ }
+
++// Antidetect: Apply WebGL spoofing to GPUInfo
++void GPUInfo::ApplyAntidetectOverrides() {
++  const auto* cmd = base::CommandLine::ForCurrentProcess();
++
++  if (cmd->HasSwitch("antidetect-webgl-vendor")) {
++    std::string vendor = cmd->GetSwitchValueASCII("antidetect-webgl-vendor");
++    gpu.gl_vendor = vendor;
++    gpu.driver_vendor = vendor;
++  }
++
++  if (cmd->HasSwitch("antidetect-webgl-renderer")) {
++    std::string renderer = cmd->GetSwitchValueASCII("antidetect-webgl-renderer");
++    gpu.gl_renderer = renderer;
++  }
++}
++
+ }  // namespace gpu
+diff --git a/gpu/config/gpu_info.h b/gpu/config/gpu_info.h
+--- a/gpu/config/gpu_info.h
++++ b/gpu/config/gpu_info.h
+@@ -300,6 +300,9 @@ struct GPU_EXPORT GPUInfo {
+   void EnumerateFields(Enumerator* enumerator) const;
+
+   bool IsInitialized() const;
++
++  // Antidetect: Override GPU info fields from command-line
++  void ApplyAntidetectOverrides();
+
+   // The currently active gpu.
+   GPUDevice gpu;

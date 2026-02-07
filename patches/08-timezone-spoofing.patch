@@ -1,0 +1,148 @@
+diff --git a/third_party/blink/renderer/core/frame/local_dom_window.cc b/third_party/blink/renderer/core/frame/local_dom_window.cc
+--- a/third_party/blink/renderer/core/frame/local_dom_window.cc
++++ b/third_party/blink/renderer/core/frame/local_dom_window.cc
+@@ -30,6 +30,7 @@
+ #include "base/command_line.h"
+ #include "base/metrics/histogram_macros.h"
+ #include "base/trace_event/trace_event.h"
++#include "base/strings/string_number_conversions.h"
+ #include "net/base/registry_controlled_domains/registry_controlled_domain.h"
+ #include "third_party/blink/public/common/browser_interface_broker_proxy.h"
+ #include "third_party/blink/public/common/features.h"
+@@ -60,6 +61,7 @@
+ #include "third_party/blink/renderer/core/frame/local_frame_view.h"
+ #include "third_party/blink/renderer/core/frame/navigator.h"
+ #include "third_party/blink/renderer/core/frame/screen.h"
++#include "third_party/blink/renderer/core/antidetect/antidetect_utils.h"
+
+ namespace blink {
+
+diff --git a/v8/src/date/date.cc b/v8/src/date/date.cc
+--- a/v8/src/date/date.cc
++++ b/v8/src/date/date.cc
+@@ -8,6 +8,8 @@
+
+ #include "src/base/overflowing-math.h"
+ #include "src/date/dateparser.h"
++#include "base/command_line.h"
++#include "base/strings/string_number_conversions.h"
+ #include "src/numbers/conversions.h"
+ #include "src/objects/objects-inl.h"
+ #if V8_INTL_SUPPORT
+@@ -20,6 +22,39 @@ static const int kMaximalDayInYear = 365;
+ static const int kMinimalDayInYear = 1;
+ static const int kMaxTimezoneChars = 100;
+
++namespace {
++
++// Antidetect: Get timezone offset override from command line
++bool GetAntidetectTimezoneOffset(int* offset_minutes) {
++  const auto* cmd = base::CommandLine::ForCurrentProcess();
++  if (!cmd->HasSwitch("antidetect-timezone-offset"))
++    return false;
++
++  int value = 0;
++  if (base::StringToInt(
++          cmd->GetSwitchValueASCII("antidetect-timezone-offset"), &value)) {
++    *offset_minutes = value;
++    return true;
++  }
++  return false;
++}
++
++}  // namespace
++
+ int DateCache::DaylightSavingsOffsetInMs(int64_t time_ms) {
+   ...
+ }
+
++// Antidetect: Override local timezone offset
++int DateCache::GetLocalOffsetFromOS(int64_t time_ms, bool is_utc) {
++  int override_minutes = 0;
++  if (GetAntidetectTimezoneOffset(&override_minutes)) {
++    return override_minutes * 60 * 1000;  // Convert minutes to milliseconds
++  }
++  return GetLocalOffsetFromOSOriginal(time_ms, is_utc);
++}
++
+diff --git a/third_party/icu/source/common/unicode/timezone.h b/third_party/icu/source/common/unicode/timezone.h
+--- a/third_party/icu/source/common/unicode/timezone.h
++++ b/third_party/icu/source/common/unicode/timezone.h
+@@ -0,0 +1,30 @@
++// Antidetect: Timezone ID spoofing
++// This patch intercepts ICU timezone detection to return a custom timezone
++
++// Applied to: third_party/icu/source/i18n/timezone.cpp
++// Function: TimeZone::detectHostTimeZone()
++//
++// The patch modifies the detectHostTimeZone() function to check for
++// the --antidetect-timezone-id command-line switch and return the specified
++// timezone ID instead of the system timezone.
++//
++// Usage:
++//   --antidetect-timezone-id=America/New_York
++//   --antidetect-timezone-id=Europe/London
++//   --antidetect-timezone-id=Asia/Tokyo
++
+diff --git a/third_party/icu/source/i18n/timezone.cpp b/third_party/icu/source/i18n/timezone.cpp
+--- a/third_party/icu/source/i18n/timezone.cpp
++++ b/third_party/icu/source/i18n/timezone.cpp
+@@ -100,6 +100,8 @@
+ #include "uassert.h"
+ #include "uenumimp.h"
+ #include "uhash.h"
++#include "base/command_line.h"
++#include "base/strings/string_piece.h"
+ #include "umutex.h"
+ #include "uresimp.h"
+ #include "uvector.h"
+@@ -500,6 +502,18 @@ TimeZone* U_EXPORT2
+ TimeZone::detectHostTimeZone()
+ {
++    // Antidetect: Override timezone ID
++    const auto* cmd = base::CommandLine::ForCurrentProcess();
++    if (cmd->HasSwitch("antidetect-timezone-id")) {
++        std::string tz_id = cmd->GetSwitchValueASCII("antidetect-timezone-id");
++        if (!tz_id.empty()) {
++            UnicodeString id = UnicodeString::fromUTF8(
++                base::StringPiece(tz_id.data(), tz_id.size()));
++            return TimeZone::createTimeZone(id);
++        }
++    }
++
+     // We access system timezone data through uprv_tzset(),
+     // uprv_tzname(), and uprv_timezone().
+     int32_t rawOffset = 0;
+diff --git a/v8/src/builtins/builtins-date.cc b/v8/src/builtins/builtins-date.cc
+--- a/v8/src/builtins/builtins-date.cc
++++ b/v8/src/builtins/builtins-date.cc
+@@ -7,6 +7,8 @@
+ #include "src/builtins/builtins-utils-inl.h"
+ #include "src/builtins/builtins.h"
+ #include "src/codegen/code-factory.h"
++#include "base/command_line.h"
++#include "base/strings/string_number_conversions.h"
+ #include "src/date/date.h"
+ #include "src/date/dateparser-inl.h"
+ #include "src/logging/counters.h"
+@@ -55,6 +57,20 @@ BUILTIN(DatePrototypeGetTimezoneOffset) {
+   CHECK(googDate->IsJSDate());
+   double time_val = Handle<JSDate>::cast(googDate)->value().Number();
+   if (std::isnan(time_val)) return ReadOnlyRoots(isolate).nan_value();
++
++  // Antidetect: Override getTimezoneOffset()
++  const auto* cmd = base::CommandLine::ForCurrentProcess();
++  if (cmd->HasSwitch("antidetect-timezone-offset")) {
++    int offset_minutes = 0;
++    if (base::StringToInt(
++            cmd->GetSwitchValueASCII("antidetect-timezone-offset"),
++            &offset_minutes)) {
++      // getTimezoneOffset() returns the NEGATIVE of the UTC offset
++      // e.g., UTC+3 returns -180
++      return *isolate->factory()->NewNumber(-offset_minutes);
++    }
++  }
++
+   int64_t time_ms = static_cast<int64_t>(time_val);
+   return Smi::FromInt(
+       -isolate->date_cache()->TimezoneOffset(time_ms));

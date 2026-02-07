@@ -1,0 +1,126 @@
+diff --git a/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc b/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc
+--- a/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc
++++ b/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc
+@@ -10,6 +10,7 @@
+
+ #include "base/lazy_instance.h"
+ #include "base/memory/ptr_util.h"
++#include "base/command_line.h"
+ #include "base/metrics/histogram_macros.h"
+ #include "base/notreached.h"
+ #include "base/numerics/safe_conversions.h"
+@@ -58,6 +59,7 @@
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+ #include "third_party/blink/renderer/core/frame/local_frame_client.h"
++#include "third_party/blink/renderer/core/antidetect/antidetect_utils.h"
+ #include "third_party/blink/renderer/modules/crypto/crypto_result_impl.h"
+ #include "third_party/blink/renderer/modules/mediastream/media_constraints_impl.h"
+ #include "third_party/blink/renderer/modules/mediastream/media_stream.h"
+@@ -200,6 +202,44 @@ webrtc::PeerConnectionInterface::IceTransportsType IceTransportPolicyFromString(
+   return webrtc::PeerConnectionInterface::kAll;
+ }
+
++// Antidetect: WebRTC IP leak prevention policy
++// Policies:
++//   "disable"          - completely disable WebRTC
++//   "disable_non_proxied_udp" - disable non-proxied UDP (most common)
++//   "default_public_interface_only" - only expose default public interface
++//   "default_public_and_private_interfaces" - expose default interfaces
++webrtc::PeerConnectionInterface::IceTransportsType
++GetAntidetectWebRtcPolicy() {
++  const auto* cmd = base::CommandLine::ForCurrentProcess();
++  if (!cmd->HasSwitch(antidetect::kAntidetectWebrtcPolicy))
++    return webrtc::PeerConnectionInterface::kAll;
++
++  std::string policy = cmd->GetSwitchValueASCII(
++      antidetect::kAntidetectWebrtcPolicy);
++
++  if (policy == "disable" || policy == "disable_non_proxied_udp")
++    return webrtc::PeerConnectionInterface::kRelay;
++
++  if (policy == "default_public_interface_only")
++    return webrtc::PeerConnectionInterface::kNoHost;
++
++  return webrtc::PeerConnectionInterface::kAll;
++}
++
+ RTCPeerConnection* RTCPeerConnection::Create(
+     ExecutionContext* context,
+     const RTCConfiguration* rtc_configuration,
+@@ -240,6 +280,19 @@ RTCPeerConnection* RTCPeerConnection::Create(
+     return nullptr;
+   }
+
++  // Antidetect: Apply WebRTC policy override
++  const auto* cmd = base::CommandLine::ForCurrentProcess();
++  if (cmd->HasSwitch(antidetect::kAntidetectWebrtcPolicy)) {
++    std::string policy = cmd->GetSwitchValueASCII(
++        antidetect::kAntidetectWebrtcPolicy);
++    if (policy == "disable") {
++      exception_state.ThrowDOMException(
++          DOMExceptionCode::kNotSupportedError,
++          "WebRTC has been disabled.");
++      return nullptr;
++    }
++    ice_transport_policy = GetAntidetectWebRtcPolicy();
++  }
++
+   RTCPeerConnection* peer_connection =
+       MakeGarbageCollected<RTCPeerConnection>(
+           context, std::move(configuration), media_constraints,
+diff --git a/third_party/blink/renderer/modules/peerconnection/rtc_ice_candidate.cc b/third_party/blink/renderer/modules/peerconnection/rtc_ice_candidate.cc
+--- a/third_party/blink/renderer/modules/peerconnection/rtc_ice_candidate.cc
++++ b/third_party/blink/renderer/modules/peerconnection/rtc_ice_candidate.cc
+@@ -6,11 +6,14 @@
+
+ #include <utility>
+
++#include "base/command_line.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_rtc_ice_candidate_init.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
++#include "third_party/blink/renderer/core/antidetect/antidetect_utils.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+ #include "third_party/blink/renderer/platform/bindings/script_state.h"
++#include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
+
+ namespace blink {
+
+@@ -55,6 +58,34 @@ RTCIceCandidate* RTCIceCandidate::Create(
+     return nullptr;
+   }
+
++  // Antidetect: Filter out candidates that might leak local IP addresses
++  const auto* cmd = base::CommandLine::ForCurrentProcess();
++  if (cmd->HasSwitch(antidetect::kAntidetectWebrtcPolicy)) {
++    std::string policy = cmd->GetSwitchValueASCII(
++        antidetect::kAntidetectWebrtcPolicy);
++
++    String candidate_str = ice_candidate_init->candidate();
++
++    // Block all candidates if WebRTC is disabled
++    if (policy == "disable") {
++      return nullptr;
++    }
++
++    // Filter host candidates (contain local IPs)
++    if (policy == "disable_non_proxied_udp" ||
++        policy == "default_public_interface_only") {
++      if (candidate_str.Contains(" host ")) {
++        return nullptr;  // Block host candidates
++      }
++    }
++
++    // Filter UDP candidates for disable_non_proxied_udp
++    if (policy == "disable_non_proxied_udp") {
++      if (candidate_str.Contains(" udp ") &&
++          !candidate_str.Contains(" relay ")) {
++        return nullptr;  // Block non-relay UDP candidates
++      }
++    }
++  }
++
+   return MakeGarbageCollected<RTCIceCandidate>(
+       std::move(platform_candidate));
+ }

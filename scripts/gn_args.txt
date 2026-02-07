@@ -1,0 +1,17 @@
+# Recommended GN args for antidetect Chromium build
+#
+# Usage:
+#   gn gen out/Antidetect --args="$(cat scripts/gn_args.txt)"
+
+is_debug = false
+is_official_build = false
+is_component_build = false
+symbol_level = 0
+enable_nacl = false
+blink_symbol_level = 0
+v8_symbol_level = 0
+treat_warnings_as_errors = false
+proprietary_codecs = true
+ffmpeg_branding = "Chrome"
+is_clang = true
+use_sysroot = true

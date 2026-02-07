@@ -1,0 +1,99 @@
+diff --git a/third_party/blink/renderer/core/dom/element.cc b/third_party/blink/renderer/core/dom/element.cc
+--- a/third_party/blink/renderer/core/dom/element.cc
++++ b/third_party/blink/renderer/core/dom/element.cc
+@@ -15,6 +15,8 @@
+ #include "base/memory/ptr_util.h"
+ #include "base/metrics/histogram_macros.h"
+ #include "base/numerics/safe_conversions.h"
++#include "base/command_line.h"
++#include "base/rand_util.h"
+ #include "cc/input/snap_selection_strategy.h"
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/public/common/privacy_budget/identifiability_metrics.h"
+@@ -50,6 +52,7 @@
+ #include "third_party/blink/renderer/core/dom/text.h"
+ #include "third_party/blink/renderer/core/dom/whitespace_attacher.h"
+ #include "third_party/blink/renderer/core/editing/editing_utilities.h"
++#include "third_party/blink/renderer/core/antidetect/antidetect_utils.h"
+
+ namespace blink {
+
+@@ -1400,6 +1403,22 @@ DOMRectList* Element::getClientRects() {
+   DCHECK(googRects);
+
+   DOMRectList* rects = MakeGarbageCollected<DOMRectList>();
++
++  // Antidetect: Add noise to client rects for fingerprint protection
++  if (antidetect::IsClientRectsNoiseEnabled()) {
++    uint64_t seed = antidetect::GetClientRectsNoiseSeed();
++    for (unsigned i = 0; i < googRects->length(); ++i) {
++      DOMRect* rect = googRects->item(i);
++      double x = rect->x() + antidetect::GetClientRectsNoiseOffset(rect->x(), seed);
++      double y = rect->y() + antidetect::GetClientRectsNoiseOffset(rect->y(), seed ^ 1);
++      double w = rect->width() + antidetect::GetClientRectsNoiseOffset(rect->width(), seed ^ 2);
++      double h = rect->height() + antidetect::GetClientRectsNoiseOffset(rect->height(), seed ^ 3);
++      rects->Append(DOMRect::Create(x, y, w, h));
++    }
++    return rects;
++  }
++
+   for (unsigned i = 0; i < googRects->length(); ++i) {
+     rects->Append(googRects->item(i));
+   }
+@@ -1420,6 +1439,19 @@ DOMRect* Element::getBoundingClientRect() {
+
+   DOMRect* rect = DOMRect::FromRectF(result);
+
++  // Antidetect: Add noise to bounding client rect
++  if (antidetect::IsClientRectsNoiseEnabled()) {
++    uint64_t seed = antidetect::GetClientRectsNoiseSeed();
++    double x = rect->x() + antidetect::GetClientRectsNoiseOffset(rect->x(), seed);
++    double y = rect->y() + antidetect::GetClientRectsNoiseOffset(rect->y(), seed ^ 1);
++    double w = rect->width() + antidetect::GetClientRectsNoiseOffset(rect->width(), seed ^ 2);
++    double h = rect->height() + antidetect::GetClientRectsNoiseOffset(rect->height(), seed ^ 3);
++    return DOMRect::Create(x, y, w, h);
++  }
++
+   return rect;
+ }
+diff --git a/third_party/blink/renderer/core/dom/range.cc b/third_party/blink/renderer/core/dom/range.cc
+--- a/third_party/blink/renderer/core/dom/range.cc
++++ b/third_party/blink/renderer/core/dom/range.cc
+@@ -10,6 +10,8 @@
+
+ #include "base/memory/ptr_util.h"
+ #include "base/numerics/safe_conversions.h"
++#include "base/command_line.h"
++#include "base/rand_util.h"
+ #include "third_party/blink/renderer/core/dom/character_data.h"
+ #include "third_party/blink/renderer/core/dom/container_node.h"
+ #include "third_party/blink/renderer/core/dom/document.h"
+@@ -30,6 +32,7 @@
+ #include "third_party/blink/renderer/core/layout/layout_text.h"
+ #include "third_party/blink/renderer/core/layout/layout_text_fragment.h"
+ #include "third_party/blink/renderer/core/svg/svg_svg_element.h"
++#include "third_party/blink/renderer/core/antidetect/antidetect_utils.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+ #include "third_party/blink/renderer/platform/geometry/float_rect.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+@@ -1600,6 +1603,20 @@ DOMRectList* Range::getClientRects() const {
+
+   DOMRectList* rects = MakeGarbageCollected<DOMRectList>();
+
++  // Antidetect: Add noise to Range client rects
++  if (antidetect::IsClientRectsNoiseEnabled()) {
++    uint64_t seed = antidetect::GetClientRectsNoiseSeed();
++    for (const auto& quad : quads) {
++      gfx::RectF rect = quad.BoundingBox();
++      double x = rect.x() + antidetect::GetClientRectsNoiseOffset(rect.x(), seed);
++      double y = rect.y() + antidetect::GetClientRectsNoiseOffset(rect.y(), seed ^ 1);
++      double w = rect.width() + antidetect::GetClientRectsNoiseOffset(rect.width(), seed ^ 2);
++      double h = rect.height() + antidetect::GetClientRectsNoiseOffset(rect.height(), seed ^ 3);
++      rects->Append(DOMRect::Create(x, y, w, h));
++    }
++    return rects;
++  }
++
+   for (const auto& quad : quads) {
+     rects->Append(DOMRect::FromRectF(quad.BoundingBox()));
+   }

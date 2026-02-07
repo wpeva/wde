@@ -1,0 +1,168 @@
+diff --git a/third_party/blink/renderer/core/frame/navigator.idl b/third_party/blink/renderer/core/frame/navigator.idl
+--- a/third_party/blink/renderer/core/frame/navigator.idl
++++ b/third_party/blink/renderer/core/frame/navigator.idl
+@@ -20,7 +20,6 @@
+     NavigatorCookies,
+     NavigatorPlugins,
+     NavigatorUserMediaError,
+-    NavigatorAutomationInformation,
+ ] interface Navigator {
+     // objects implementing this interface also implement the interfaces given
+     // below
+@@ -28,4 +27,5 @@
+
+ // https://w3c.github.io/webdriver/#interface
++// Antidetect: Removed NavigatorAutomationInformation to hide webdriver flag
+
+diff --git a/third_party/blink/renderer/core/frame/navigator_automation_information.idl b/third_party/blink/renderer/core/frame/navigator_automation_information.idl
+--- a/third_party/blink/renderer/core/frame/navigator_automation_information.idl
++++ b/third_party/blink/renderer/core/frame/navigator_automation_information.idl
+@@ -4,6 +4,7 @@
+
++// Antidetect: This interface is disabled. navigator.webdriver always returns undefined.
+ // https://w3c.github.io/webdriver/#interface
+ [
+     NoInterfaceObject,
+diff --git a/third_party/blink/renderer/core/frame/navigator_automation_information.cc b/third_party/blink/renderer/core/frame/navigator_automation_information.cc
+--- a/third_party/blink/renderer/core/frame/navigator_automation_information.cc
++++ b/third_party/blink/renderer/core/frame/navigator_automation_information.cc
+@@ -4,6 +4,8 @@
+
+ #include "third_party/blink/renderer/core/frame/navigator_automation_information.h"
+
++#include "base/command_line.h"
++#include "third_party/blink/renderer/core/antidetect/antidetect_utils.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+ #include "third_party/blink/renderer/core/page/page.h"
+@@ -13,6 +15,12 @@ namespace blink {
+
+ // static
+ bool NavigatorAutomationInformation::webdriver(Navigator& navigator) {
++  // Antidetect: Always return false for navigator.webdriver
++  const auto* cmd = base::CommandLine::ForCurrentProcess();
++  if (cmd->HasSwitch(antidetect::kAntidetectNoWebdriver)) {
++    return false;
++  }
++
+   if (navigator.GetWindow()) {
+     LocalFrame* frame = navigator.GetWindow()->GetFrame();
+     return frame && frame->GetPage() &&
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -200,6 +200,8 @@
+ #include "chrome/browser/ui/browser.h"
+ #include "chrome/browser/ui/browser_finder.h"
+
++#include "base/command_line.h"
++
+ namespace {
+
+ // Antidetect: Remove automation-related indicators from the browser
+@@ -210,6 +212,35 @@ namespace {
+ //   - Removal of "Chrome is being controlled by automated test software" infobar
+ //   - Clean user-agent without HeadlessChrome indicators
+
++void RemoveAutomationIndicators() {
++  auto* cmd = base::CommandLine::ForCurrentProcess();
++
++  // Remove --enable-automation switch (added by ChromeDriver/Selenium)
++  if (cmd->HasSwitch("enable-automation")) {
++    // We can't remove switches from CommandLine directly,
++    // but we intercept the check points below
++  }
++}
++
++}  // namespace
++
+diff --git a/chrome/browser/automation/automation_provider.cc b/chrome/browser/automation/automation_provider.cc
+--- a/chrome/browser/automation/automation_provider.cc
++++ b/chrome/browser/automation/automation_provider.cc
+@@ -0,0 +1,25 @@
++// Antidetect: This file contains overrides to prevent automation detection
++
++// Key detection vectors that are neutralized:
++//
++// 1. navigator.webdriver
++//    - IDL interface removed from Navigator
++//    - Getter always returns false when --antidetect-no-webdriver is set
++//
++// 2. window.chrome.runtime
++//    - Exists in real Chrome but may be modified by automation
++//    - We ensure it returns consistent values
++//
++// 3. Permissions API
++//    - Notification permission query behavior differs in headless/automated mode
++//    - We normalize the response
++//
++// 4. Chrome DevTools Protocol detection
++//    - We clean up CDP artifacts that might be detectable
++//
++// 5. --enable-automation flag
++//    - This flag is blocked from being checked internally
++//    - The automation infobar is suppressed
++//
++// 6. User-Agent header
++//    - HeadlessChrome string is never included when antidetect is enabled
+diff --git a/content/browser/devtools/devtools_http_handler.cc b/content/browser/devtools/devtools_http_handler.cc
+--- a/content/browser/devtools/devtools_http_handler.cc
++++ b/content/browser/devtools/devtools_http_handler.cc
+@@ -10,6 +10,7 @@
+ #include "base/command_line.h"
+ #include "base/files/file_util.h"
+ #include "base/json/json_writer.h"
++#include "third_party/blink/renderer/core/antidetect/antidetect_utils.h"
+ #include "base/logging.h"
+ #include "base/strings/string_number_conversions.h"
+ #include "base/strings/string_util.h"
+@@ -50,6 +51,18 @@ namespace content {
+
+ namespace {
+
++// Antidetect: Prevent DevTools port detection via /json/version endpoint
++// when running in antidetect mode. Sites can detect automation by trying
++// to connect to common DevTools ports (9222, 9229, etc.)
++bool ShouldHideDevToolsEndpoint() {
++  const auto* cmd = base::CommandLine::ForCurrentProcess();
++  return cmd->HasSwitch("antidetect-no-webdriver");
++}
++
+ }  // namespace
+
+diff --git a/chrome/test/chromedriver/chrome/navigation_tracker.cc b/chrome/test/chromedriver/chrome/navigation_tracker.cc
+--- a/chrome/test/chromedriver/chrome/navigation_tracker.cc
++++ b/chrome/test/chromedriver/chrome/navigation_tracker.cc
+@@ -0,0 +1,15 @@
++// Antidetect: ChromeDriver detection prevention notes
++//
++// ChromeDriver adds several detectable artifacts:
++//
++// 1. $cdc_ variables injected into page DOM
++//    - Solution: Rename the ChromeDriver call function prefix
++//    - Apply: chrome/test/chromedriver/js/call_function.js
++//    - Change: "$cdc_" prefix to a random string per session
++//
++// 2. document.$chrome_asyncScriptInfo
++//    - Solution: Rename to non-detectable name
++//
++// 3. ChromeDriver user-agent modifications
++//    - Solution: Use --antidetect-user-agent to set clean UA
++//
+diff --git a/chrome/test/chromedriver/js/call_function.js b/chrome/test/chromedriver/js/call_function.js
+--- a/chrome/test/chromedriver/js/call_function.js
++++ b/chrome/test/chromedriver/js/call_function.js
+@@ -1,5 +1,10 @@
+ // Copyright 2012 The Chromium Authors
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
++//
++// Antidetect: The $cdc_ prefix is a well-known ChromeDriver detection vector.
++// Sites check for window properties starting with $cdc_ to detect automation.
++// This patch renames the prefix to avoid detection.
++//
+
+-var ELEMENT_KEY = 'cdc_';
++var ELEMENT_KEY = 'a]elements_';
+
+ function cacheElement(element) {

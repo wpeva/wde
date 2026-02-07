@@ -1,0 +1,125 @@
+diff --git a/third_party/blink/renderer/modules/webaudio/audio_buffer.cc b/third_party/blink/renderer/modules/webaudio/audio_buffer.cc
+--- a/third_party/blink/renderer/modules/webaudio/audio_buffer.cc
++++ b/third_party/blink/renderer/modules/webaudio/audio_buffer.cc
+@@ -5,6 +5,8 @@
+ #include "third_party/blink/renderer/modules/webaudio/audio_buffer.h"
+
+ #include "base/logging.h"
++#include "base/command_line.h"
++#include "base/rand_util.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_audio_buffer_options.h"
+ #include "third_party/blink/renderer/modules/webaudio/base_audio_context.h"
+ #include "third_party/blink/renderer/platform/audio/audio_bus.h"
+@@ -13,6 +15,7 @@
+ #include "third_party/blink/renderer/platform/bindings/exception_messages.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
++#include "third_party/blink/renderer/core/antidetect/antidetect_utils.h"
+
+ namespace blink {
+
+@@ -198,6 +201,28 @@ void AudioBuffer::CopyFromChannel(NotShared<DOMFloat32Array> destination,
+   memcpy(dst, src + offset, count * sizeof(float));
+ }
+
++// Antidetect: Add noise to getChannelData output
++void AudioBuffer::ApplyAudioNoise(float* data, size_t length) {
++  if (!antidetect::IsAudioNoiseEnabled())
++    return;
++
++  uint64_t seed = antidetect::GetAudioNoiseSeed();
++  uint64_t state = seed;
++  if (state == 0) state = 0xcafebeef12345678ULL;
++
++  for (size_t i = 0; i < length; ++i) {
++    state ^= state >> 12;
++    state ^= state << 25;
++    state ^= state >> 27;
++    uint64_t rng = state * 0x2545F4914F6CDD1DULL;
++
++    // Add noise of magnitude ~1e-7 (imperceptible but changes hash)
++    if ((rng & 0x7) == 0) {
++      double noise = (static_cast<double>(rng >> 32) / 0xFFFFFFFF - 0.5) * 2e-7;
++      data[i] += static_cast<float>(noise);
++    }
++  }
++}
++
+ NotShared<DOMFloat32Array> AudioBuffer::getChannelData(
+     unsigned channel_index,
+     ExceptionState& exception_state) {
+@@ -209,6 +234,10 @@ NotShared<DOMFloat32Array> AudioBuffer::getChannelData(
+   }
+   DOMFloat32Array* channel_data = channels_[channel_index].Get();
+
++  // Antidetect: Apply noise before returning channel data
++  ApplyAudioNoise(static_cast<float*>(channel_data->Data()),
++                  channel_data->length());
++
+   return NotShared<DOMFloat32Array>(channel_data);
+ }
+
+diff --git a/third_party/blink/renderer/modules/webaudio/audio_buffer.h b/third_party/blink/renderer/modules/webaudio/audio_buffer.h
+--- a/third_party/blink/renderer/modules/webaudio/audio_buffer.h
++++ b/third_party/blink/renderer/modules/webaudio/audio_buffer.h
+@@ -90,6 +90,9 @@ class AudioBuffer final : public ScriptWrappable {
+   void Trace(Visitor*) const override;
+
+  private:
++  // Antidetect: Add imperceptible noise to audio data
++  void ApplyAudioNoise(float* data, size_t length);
++
+   static DOMFloat32Array* CreateFloat32ArrayOrNull(
+       uint32_t length,
+       InitializationPolicy = kZeroInitialize);
+diff --git a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc b/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
+--- a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
++++ b/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
+@@ -5,6 +5,8 @@
+ #include "third_party/blink/renderer/modules/webaudio/offline_audio_context.h"
+
+ #include "base/metrics/histogram_functions.h"
++#include "base/command_line.h"
++#include "base/rand_util.h"
+ #include "third_party/blink/public/platform/platform.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_offline_audio_context_options.h"
+@@ -20,6 +22,7 @@
+ #include "third_party/blink/renderer/platform/audio/audio_utilities.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_messages.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_state.h"
++#include "third_party/blink/renderer/core/antidetect/antidetect_utils.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+
+ namespace blink {
+@@ -300,6 +303,29 @@ void OfflineAudioContext::FireCompletionEvent() {
+   if (!rendered_buffer)
+     return;
+
++  // Antidetect: Add noise to rendered offline audio buffer
++  if (antidetect::IsAudioNoiseEnabled()) {
++    uint64_t seed = antidetect::GetAudioNoiseSeed();
++    for (unsigned ch = 0; ch < rendered_buffer->numberOfChannels(); ++ch) {
++      DOMFloat32Array* channel = rendered_buffer->getChannelData(ch);
++      float* data = static_cast<float*>(channel->Data());
++      size_t length = channel->length();
++
++      uint64_t state = seed ^ (ch * 0x9E3779B97F4A7C15ULL);
++      if (state == 0) state = 0xdeadbeef;
++
++      for (size_t i = 0; i < length; ++i) {
++        state ^= state >> 12;
++        state ^= state << 25;
++        state ^= state >> 27;
++        uint64_t rng = state * 0x2545F4914F6CDD1DULL;
++        if ((rng & 0x7) == 0) {
++          double noise = (static_cast<double>(rng >> 32) / 0xFFFFFFFF - 0.5) * 2e-7;
++          data[i] += static_cast<float>(noise);
++        }
++      }
++    }
++  }
++
+   SetContextState(V8AudioContextState::Enum::kClosed);
+
+   ScriptState* script_state = ScriptState::ForRelevantRealm(*this);
