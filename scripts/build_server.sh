@@ -157,69 +157,24 @@ apply_patches() {
     log "=== Step 4/5: Applying Antidetect Patches ==="
 
     CHROMIUM_SRC="$WORK_DIR/chromium/src"
-    PATCH_DIR="$WDE_DIR/patches"
+    AUTOPATCHER="$WDE_DIR/autopatcher/apply.py"
 
-    if [ ! -d "$PATCH_DIR" ]; then
-        err "Patch directory not found: $PATCH_DIR"
-        err "Make sure the WDE repo is cloned properly"
+    if [ ! -f "$AUTOPATCHER" ]; then
+        err "Autopatcher not found: $AUTOPATCHER"
         exit 1
     fi
 
-    # Create the antidetect utils directory
-    mkdir -p "$CHROMIUM_SRC/third_party/blink/renderer/core/antidetect"
+    # Run the semantic autopatcher (finds functions by signature, not line numbers)
+    log "Running semantic autopatcher..."
+    python3 "$AUTOPATCHER" "$CHROMIUM_SRC" --verbose
 
-    # First, extract and apply the new-file patches (antidetect_utils.h, BUILD.gn)
-    # These are embedded in patch 01
-    log "Extracting antidetect_utils.h from patch 01..."
-
-    APPLIED=0
-    FAILED=0
-    NEEDS_MANUAL=()
-
-    for patch_file in "$PATCH_DIR"/*.patch; do
-        patch_name="$(basename "$patch_file")"
-        echo -n "  [*] $patch_name... "
-
-        # Try strict apply first
-        if git -C "$CHROMIUM_SRC" apply --check "$patch_file" 2>/dev/null; then
-            git -C "$CHROMIUM_SRC" apply "$patch_file"
-            echo "OK"
-            ((APPLIED++))
-        # Try with fuzz
-        elif git -C "$CHROMIUM_SRC" apply --check -C0 "$patch_file" 2>/dev/null; then
-            git -C "$CHROMIUM_SRC" apply -C0 "$patch_file"
-            echo "OK (fuzzy)"
-            ((APPLIED++))
-        # Try 3-way merge
-        elif git -C "$CHROMIUM_SRC" apply --check --3way "$patch_file" 2>/dev/null; then
-            git -C "$CHROMIUM_SRC" apply --3way "$patch_file"
-            echo "OK (3-way)"
-            ((APPLIED++))
-        else
-            echo "NEEDS MANUAL ADAPTATION"
-            ((FAILED++))
-            NEEDS_MANUAL+=("$patch_name")
-        fi
-    done
-
-    echo ""
-    log "Patches applied: $APPLIED"
-    if [ $FAILED -gt 0 ]; then
-        warn "Patches needing manual adaptation: $FAILED"
-        for p in "${NEEDS_MANUAL[@]}"; do
-            warn "  - $p"
-        done
-        warn ""
-        warn "These patches reference specific line numbers that may have shifted"
-        warn "in your Chromium version. You need to manually apply the changes."
-        warn ""
-        warn "The patches are well-commented, showing exactly which files and"
-        warn "functions to modify. See README.md for details."
-        warn ""
+    if [ $? -ne 0 ]; then
+        warn "Some injection rules failed — check output above."
+        warn "The build may still succeed if failed rules target optional features."
         read -p "Continue with build anyway? [y/N] " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            err "Aborted. Fix patches and re-run with SKIP_DOWNLOAD=1"
+            err "Aborted."
             exit 1
         fi
     fi
@@ -229,7 +184,6 @@ apply_patches() {
     if [ -f "$CORE_BUILD_GN" ]; then
         if ! grep -q "antidetect" "$CORE_BUILD_GN"; then
             log "Registering antidetect module in core/BUILD.gn..."
-            # Add to the deps list
             sed -i '/group("core") {/,/deps = \[/ {
                 /deps = \[/a\    "//third_party/blink/renderer/core/antidetect",
             }' "$CORE_BUILD_GN" 2>/dev/null || \

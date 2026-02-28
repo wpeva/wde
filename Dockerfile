@@ -65,19 +65,14 @@ RUN cd /build/chromium/src && \
 RUN cd /build/chromium/src && \
     gclient runhooks
 
-# Copy patches
+# Copy autopatcher + scripts
+COPY autopatcher/ /wde/autopatcher/
 COPY patches/ /wde/patches/
 COPY scripts/ /wde/scripts/
 
-# Apply patches
+# Apply patches via semantic autopatcher (version-agnostic)
 RUN cd /build/chromium/src && \
-    mkdir -p third_party/blink/renderer/core/antidetect && \
-    for patch in /wde/patches/*.patch; do \
-        echo "Applying $(basename $patch)..." && \
-        git apply --check "$patch" 2>/dev/null && git apply "$patch" && echo "  OK" || \
-        (git apply --check -C0 "$patch" 2>/dev/null && git apply -C0 "$patch" && echo "  OK (fuzzy)") || \
-        echo "  SKIP (needs manual fix)"; \
-    done
+    python3 /wde/autopatcher/apply.py . --verbose
 
 # Generate build config
 RUN cd /build/chromium/src && \

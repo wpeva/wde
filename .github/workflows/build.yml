@@ -36,10 +36,11 @@ on:
   schedule:
     - cron: '0 6 * * 1'
 
-  # Rebuild when patches change
+  # Rebuild when patches or autopatcher change
   push:
     paths:
       - 'patches/**'
+      - 'autopatcher/**'
       - 'Dockerfile'
       - 'scripts/**'
 
