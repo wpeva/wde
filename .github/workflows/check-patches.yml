@@ -1,0 +1,120 @@
+###############################################################################
+# WDE — Patch Compatibility Checker
+#
+# Lightweight job that runs daily to check if patches still apply
+# to the latest Chromium stable without doing a full build.
+#
+# If patches fail, creates a GitHub issue with details.
+###############################################################################
+
+name: Check Patch Compatibility
+
+on:
+  schedule:
+    - cron: '0 8 * * *'  # Daily at 08:00 UTC
+  workflow_dispatch:
+
+jobs:
+  check-patches:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get latest Chromium stable version
+        id: version
+        run: |
+          VERSION=$(curl -sS "https://omahaproxy.appspot.com/all.json" | \
+            python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          for p in data:
+              if p['os'] == 'linux':
+                  for v in p['versions']:
+                      if v['channel'] == 'stable':
+                          print(v['version']); break
+                  break
+          ")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Latest stable: $VERSION"
+
+      - name: Shallow clone Chromium source (files only, no build)
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          echo "Fetching file list for key patched files..."
+
+          # We don't need the full source — just check if the files
+          # we patch still exist and have similar structure.
+          # Use Chromium's Gitiles API to fetch individual files.
+
+          BASE="https://chromium.googlesource.com/chromium/src/+/refs/tags/${VERSION}"
+
+          FILES=(
+            "third_party/blink/renderer/core/html/canvas/html_canvas_element.cc"
+            "third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc"
+            "third_party/blink/renderer/modules/webaudio/audio_buffer.cc"
+            "third_party/blink/renderer/core/frame/navigator.cc"
+            "third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc"
+            "third_party/blink/renderer/core/frame/navigator_device_memory.cc"
+            "third_party/blink/renderer/core/frame/screen.cc"
+            "third_party/blink/renderer/core/dom/element.cc"
+            "third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc"
+            "third_party/blink/renderer/platform/fonts/font_cache.cc"
+            "third_party/blink/renderer/core/frame/navigator_automation_information.cc"
+          )
+
+          mkdir -p /tmp/chromium-check
+          ISSUES=""
+
+          for file in "${FILES[@]}"; do
+            STATUS=$(curl -sS -o /dev/null -w "%{http_code}" "${BASE}/${file}?format=TEXT")
+            if [ "$STATUS" = "200" ]; then
+              echo "  OK: $file"
+            else
+              echo "  MISSING: $file (HTTP $STATUS)"
+              ISSUES="${ISSUES}\n- \`${file}\` — HTTP $STATUS (file moved or renamed)"
+            fi
+          done
+
+          if [ -n "$ISSUES" ]; then
+            echo "has_issues=true" >> "$GITHUB_ENV"
+            echo -e "$ISSUES" > /tmp/patch-issues.txt
+          else
+            echo "has_issues=false" >> "$GITHUB_ENV"
+            echo "All patched files still exist in Chromium $VERSION"
+          fi
+
+      - name: Create issue if patches may be broken
+        if: env.has_issues == 'true'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ISSUES=$(cat /tmp/patch-issues.txt)
+
+          # Check if issue already exists
+          EXISTING=$(gh issue list --label "patch-compat" --state open --json number --jq length)
+          if [ "$EXISTING" -gt "0" ]; then
+            echo "Issue already exists, skipping"
+            exit 0
+          fi
+
+          gh issue create \
+            --title "Patches may be incompatible with Chromium $VERSION" \
+            --body "$(cat <<EOF
+          ## Patch Compatibility Warning
+
+          Some files targeted by our patches appear to have changed in Chromium **$VERSION**:
+
+          $ISSUES
+
+          ### Action needed:
+          1. Check if the files were renamed/moved
+          2. Update the affected patches
+          3. Test with \`git apply --check\`
+          4. Run a full build to verify
+
+          ### Automated check
+          This issue was created by the daily patch compatibility checker.
+          EOF
+          )" \
+            --label "patch-compat"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,194 @@
+###############################################################################
+# WDE Antidetect Browser — CI/CD Build Pipeline
+#
+# Triggers:
+#   1. Manual dispatch (choose Chromium version)
+#   2. Scheduled: checks for new Chromium stable every Monday
+#   3. Push to patches/ directory
+#
+# Self-hosted runner REQUIRED — GitHub-hosted runners have 14 GB disk only.
+# Setup: https://docs.github.com/en/actions/hosting-your-own-runners
+#
+# Runner requirements:
+#   - Ubuntu 22.04
+#   - 250+ GB free disk
+#   - 16+ GB RAM
+#   - Docker installed
+###############################################################################
+
+name: Build Antidetect Browser
+
+on:
+  # Manual trigger with version selection
+  workflow_dispatch:
+    inputs:
+      chromium_version:
+        description: 'Chromium version tag (e.g., 131.0.6778.69). Leave empty for latest stable.'
+        required: false
+        default: ''
+      force_rebuild:
+        description: 'Force rebuild even if version unchanged'
+        required: false
+        type: boolean
+        default: false
+
+  # Auto-check every Monday at 06:00 UTC
+  schedule:
+    - cron: '0 6 * * 1'
+
+  # Rebuild when patches change
+  push:
+    paths:
+      - 'patches/**'
+      - 'Dockerfile'
+      - 'scripts/**'
+
+jobs:
+  # ---- Job 1: Check for new Chromium version ----
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
+      should_build: ${{ steps.check.outputs.should_build }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get latest stable Chromium version
+        id: get-version
+        run: |
+          if [ -n "${{ github.event.inputs.chromium_version }}" ]; then
+            VERSION="${{ github.event.inputs.chromium_version }}"
+          else
+            # Fetch latest stable version from OmahaProxy
+            VERSION=$(curl -sS "https://omahaproxy.appspot.com/all.json" | \
+              python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          for platform in data:
+              if platform['os'] == 'linux':
+                  for ver in platform['versions']:
+                      if ver['channel'] == 'stable':
+                          print(ver['version'])
+                          break
+                  break
+          ")
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Chromium version: $VERSION"
+
+      - name: Check if build is needed
+        id: check
+        run: |
+          VERSION="${{ steps.get-version.outputs.version }}"
+          FORCE="${{ github.event.inputs.force_rebuild }}"
+
+          # Check if we already have this version built
+          if [ "$FORCE" = "true" ] || [ "${{ github.event_name }}" = "push" ]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "Build forced or patches changed"
+          else
+            # Check releases for existing version
+            EXISTING=$(gh release view "v${VERSION}" --json tagName 2>/dev/null || echo "")
+            if [ -z "$EXISTING" ]; then
+              echo "should_build=true" >> "$GITHUB_OUTPUT"
+              echo "New version $VERSION, build needed"
+            else
+              echo "should_build=false" >> "$GITHUB_OUTPUT"
+              echo "Version $VERSION already built, skipping"
+            fi
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---- Job 2: Build on self-hosted runner ----
+  build:
+    needs: check-version
+    if: needs.check-version.outputs.should_build == 'true'
+    runs-on: self-hosted  # MUST be self-hosted (250+ GB disk needed)
+    timeout-minutes: 720  # 12 hours max
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet || true
+          df -h .
+
+      - name: Build with Docker
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          echo "Building Chromium $VERSION..."
+
+          docker build \
+            --build-arg CHROMIUM_VERSION="$VERSION" \
+            --build-arg BUILD_JOBS="$(nproc)" \
+            -t wde-browser:"$VERSION" \
+            -f Dockerfile .
+
+      - name: Extract binary from Docker image
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+
+          docker create --name wde-extract wde-browser:"$VERSION"
+          mkdir -p dist/antidetect-browser
+          docker cp wde-extract:/browser/. dist/antidetect-browser/
+          docker rm wde-extract
+
+          # Create archive
+          cd dist
+          tar -czf "antidetect-browser-${VERSION}-linux-x64.tar.gz" antidetect-browser/
+
+          ls -lh "antidetect-browser-${VERSION}-linux-x64.tar.gz"
+
+      - name: Create GitHub Release
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          ARCHIVE="dist/antidetect-browser-${VERSION}-linux-x64.tar.gz"
+
+          gh release create "v${VERSION}" \
+            --title "Antidetect Browser v${VERSION}" \
+            --notes "$(cat <<NOTES
+          ## Chromium ${VERSION} Antidetect Build
+
+          ### Included patches:
+          $(ls -1 patches/*.patch | sed 's|patches/||' | sed 's/^/- /')
+
+          ### Usage:
+          \`\`\`bash
+          tar xzf antidetect-browser-${VERSION}-linux-x64.tar.gz
+          cd antidetect-browser
+          ./launch_antidetect.sh --profile my_profile
+          \`\`\`
+
+          ### Flags reference: see [README.md](../../blob/master/README.md)
+          NOTES
+          )" \
+            "$ARCHIVE"
+
+          echo "Release created: v${VERSION}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cleanup
+        if: always()
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          docker rmi "wde-browser:$VERSION" 2>/dev/null || true
+          rm -rf dist/
+
+  # ---- Job 3: Notify on failure ----
+  notify:
+    needs: [check-version, build]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create issue on failure
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          gh issue create \
+            --title "Build failed for Chromium $VERSION" \
+            --body "The automated build for Chromium $VERSION failed. Patches may need adaptation. Check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})." \
+            --label "build-failure"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
