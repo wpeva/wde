@@ -185,7 +185,13 @@ class AutoPatcher:
 
         # Determine insertion point
         insert_at = None
-        code_lines = [l + "\n" for l in injection.code.split("\n")]
+        # Strip leading/trailing blank lines from code to avoid messy output
+        raw_lines = injection.code.split("\n")
+        while raw_lines and raw_lines[0].strip() == "":
+            raw_lines.pop(0)
+        while raw_lines and raw_lines[-1].strip() == "":
+            raw_lines.pop()
+        code_lines = [l + "\n" for l in raw_lines]
 
         if injection.position == "before_line":
             insert_at = anchor_line

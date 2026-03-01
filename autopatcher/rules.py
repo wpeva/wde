@@ -347,15 +347,19 @@ RULES: list[Injection] = [
         position="start_of_function",
         guard="// Antidetect: languages",
         includes=[INC_UTILS, INC_CMD, INC_STRSPLIT],
+        # NOTE: This function returns const Vector<String>& (a reference).
+        # Returning a local variable would be a dangling reference!
+        # Use a static local to keep the returned reference alive.
         code="""
   // Antidetect: languages
   if (antidetect::HasSwitch(antidetect::kLanguages)) {
-    Vector<String> result;
+    static Vector<String> antidetect_langs;
+    antidetect_langs.clear();
     for (const auto& p : base::SplitString(
              antidetect::GetSwitch(antidetect::kLanguages),
              ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY))
-      result.push_back(String::FromUTF8(p));
-    if (!result.empty()) return result;
+      antidetect_langs.push_back(String::FromUTF8(p));
+    if (!antidetect_langs.empty()) return antidetect_langs;
   }
 """,
     ),
@@ -601,5 +605,124 @@ RULES: list[Injection] = [
         position="replace_line",
         guard="a]elements_",
         code="var ELEMENT_KEY = 'a]elements_';",
+    ),
+
+    # ===== 09: PLUGIN / MIME TYPE SPOOFING =====
+    Injection(
+        id="plugin-array-length",
+        description="Override DOMPluginArray::length for plugin spoofing",
+        file="third_party/blink/renderer/modules/plugins/dom_plugin_array.cc",
+        anchor=r'unsigned DOMPluginArray::length\b',
+        position="start_of_function",
+        guard="// Antidetect: plugin list",
+        includes=[INC_UTILS, INC_CMD, INC_STRSPLIT],
+        code="""
+  // Antidetect: plugin list
+  if (antidetect::HasSwitch(antidetect::kPluginList)) {
+    std::string plugin_list = antidetect::GetSwitch(antidetect::kPluginList);
+    if (plugin_list == "none") return 0;
+    auto parts = base::SplitString(plugin_list, ";",
+        base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
+    return static_cast<unsigned>(parts.size());
+  }
+""",
+    ),
+
+    Injection(
+        id="mime-type-array-length",
+        description="Override DOMMimeTypeArray::length for MIME type spoofing",
+        file="third_party/blink/renderer/modules/plugins/dom_mime_type_array.cc",
+        anchor=r'unsigned DOMMimeTypeArray::length\b',
+        position="start_of_function",
+        guard="// Antidetect: mime type list",
+        includes=[INC_UTILS, INC_CMD],
+        code="""
+  // Antidetect: mime type list
+  if (antidetect::HasSwitch(antidetect::kPluginList)) {
+    std::string plugin_list = antidetect::GetSwitch(antidetect::kPluginList);
+    if (plugin_list == "none") return 0;
+    return 2;  // application/pdf + text/pdf
+  }
+""",
+    ),
+
+    # ===== 06b: RANGE CLIENT RECTS NOISE =====
+    Injection(
+        id="range-getClientRects-noise",
+        description="Add noise to Range::getClientRects",
+        file="third_party/blink/renderer/core/dom/range.cc",
+        anchor=r'DOMRectList\* Range::getClientRects\b',
+        position="before_return",
+        guard="// Antidetect: range rects noise",
+        includes=[INC_UTILS, INC_CMD, INC_RAND],
+        code="""
+  // Antidetect: range rects noise
+  if (antidetect::IsClientRectsNoiseEnabled()) {
+    uint64_t seed = antidetect::GetClientRectsNoiseSeed();
+    DOMRectList* noisy = MakeGarbageCollected<DOMRectList>();
+    for (unsigned i = 0; i < rects->length(); ++i) {
+      DOMRect* r = rects->item(i);
+      noisy->Append(DOMRect::Create(
+          r->x() + antidetect::ClientRectsNoise(r->x(), seed),
+          r->y() + antidetect::ClientRectsNoise(r->y(), seed ^ 1),
+          r->width() + antidetect::ClientRectsNoise(r->width(), seed ^ 2),
+          r->height() + antidetect::ClientRectsNoise(r->height(), seed ^ 3)));
+    }
+    return noisy;
+  }
+""",
+    ),
+
+    # ===== 05b: WEBRTC ICE CANDIDATE FILTERING =====
+    Injection(
+        id="webrtc-ice-candidate-filter",
+        description="Filter ICE candidates to prevent IP leak",
+        file="third_party/blink/renderer/modules/peerconnection/rtc_ice_candidate.cc",
+        anchor=r'RTCIceCandidate\* RTCIceCandidate::Create\b',
+        position="start_of_function",
+        guard="// Antidetect: ice candidate filter",
+        includes=[INC_UTILS, INC_CMD],
+        code="""
+  // Antidetect: ice candidate filter
+  if (antidetect::HasSwitch(antidetect::kWebrtcPolicy)) {
+    std::string policy = antidetect::GetSwitch(antidetect::kWebrtcPolicy);
+    if (policy == "disable") return nullptr;
+    if (policy == "default_public_interface_only" || policy == "disable_non_proxied_udp") {
+      if (ice_candidate_init && ice_candidate_init->hasCandidate()) {
+        String candidate_str = ice_candidate_init->candidate();
+        if (candidate_str.Contains(" host ")) return nullptr;
+      }
+    }
+  }
+""",
+    ),
+
+    # ===== 07b: CSS FONT SELECTOR FILTERING =====
+    Injection(
+        id="css-font-selector-filter",
+        description="Filter fonts in CSSFontSelector::GetFontData",
+        file="third_party/blink/renderer/core/css/css_font_selector.cc",
+        anchor=r'FontData.*CSSFontSelector::GetFontData\b',
+        position="start_of_function",
+        guard="// Antidetect: css font filter",
+        includes=[INC_UTILS, INC_CMD, INC_STRSPLIT],
+        code="""
+  // Antidetect: css font filter
+  if (antidetect::HasSwitch(antidetect::kFontList)) {
+    static bool init = false;
+    static HashSet<String> allowed;
+    if (!init) {
+      for (const auto& f : base::SplitString(
+               antidetect::GetSwitch(antidetect::kFontList),
+               ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY))
+        allowed.insert(String::FromUTF8(f).LowerASCII());
+      for (const char* g : {"serif","sans-serif","monospace","cursive","fantasy","system-ui","math","emoji","fangsong"})
+        allowed.insert(String(g));
+      init = true;
+    }
+    if (!allowed.Contains(family_name.LowerASCII()))
+      return nullptr;
+  }
+""",
     ),
 ]
